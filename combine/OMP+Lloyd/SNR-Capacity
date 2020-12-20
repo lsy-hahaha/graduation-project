@@ -1,0 +1,295 @@
+clear all
+clc
+
+NofSNR=[-20 -15 -10 0 10 15 20]; % Different number of transmitted antennas 不同数目的发射天线 不同的信噪比
+NofQ_bit=[2 4 8];
+%%---------------azimuth angle chosen in uniform PT and PR dictionaries
+for ip=1:3
+    Q_bit=NofQ_bit(ip);
+for iyte=1:7
+Mt=128;  %BS天线数目
+
+Mr=2;    %UE天线数目
+L=randi([5 10],1); %randi：L是[5-10]之间的一个1×1矩阵（其实就是5-10之间的一个数）
+fc=2*10^9; % Carrier frequency=2GHz 载波频率是2GHz
+c=3*10^8; % Speed of light 光速
+lambda=c/fc; % 0.15 Carrier wavelenght(m) 波长，载波波长0.15m
+d=lambda/2;
+Gdb=8 ; %dB max directional gain 最大（？）增益
+phi3db =55; % degree 3dB beamwidth 3dB波束宽度
+Am=30 ;%db front to back ratio 前后比
+Gt=140; %词典的成员（？）
+Gr=16;  %词典的成员（？）
+phi= randi([0 360],16,140); %角度 随机产生在0-360之间，16×140维矩阵（对应于收发天线数目）
+a=-180;
+b=180;
+Ntr=64;
+SNR=NofSNR(iyte); %7种数目的发射天线
+
+for r=1:Gr
+PR(r)=a+r*(b-a)/(Gr+1); %PR(r)=-180+r*360/(16+1) 假设接收天线方位角(AoA?)均匀分布在[-180°，180°]上
+end
+PR_trans=transpose(PR); %transpose：取转置(仅转置，不共轭)
+
+ for z=1:Gt
+PT(z)=a+z*(b-a)/(Gt+1); %PT(z)=-180+z*360/(140+1) 假设发射天线方位角(AoD?)也均匀分布在[-180°，180°]上
+ end
+
+
+Ct=1;
+
+Cr=1;
+
+%%
+
+%%---------------*********** Azimuth Angle *************-----------------------
+
+%---***/*/*------------BS azimuth Angle--------- BS方位角
+
+for yth=1:Mt  %yth=1:128
+
+          for j=1:1
+              for zth=1:Gt  %zth=1:140
+              u1(j,zth) = (d/lambda)*sin(PT(j,zth).*pi/180); %u1是1×140维矩阵，u1=0.5*sin(对应发射天线方位角，弧度制)
+              aT(yth,zth) = exp(-1i*2*pi*u1(j,zth)*(yth-1)')/sqrt(Mt); % Azimuth Scanning Steering Vector.方位扫描导向矢量 aT是128×140维矩阵
+              %猜测：是基站发射导向信号，天线之间的距离为0.5 lambda，是均匀分布的天线阵列
+              end
+    end
+end
+At=Ct.*aT;           %为什么要写这一步？
+At_h=ctranspose(At); %ctranspose：求矩阵的复共轭转置 At_h是At的复共轭转置，即aT的复共轭转置
+%------------------------------------------------
+%--------------UE azimuth Angle---------UE方位角
+Mr=2; %用户端天线数目
+for yth2=1:Mr  %yth2=1:2
+
+          for j2=1:1         
+              for zth2=1:Gr
+              u2(j2,zth2) = (d/lambda)*sin(PR(j2,zth2).*pi/180);
+              aR(yth2,zth2) = exp(-1i*2*pi*u2(j2,zth2)*(yth2-1)')/sqrt(Mr); % Azimuth Scanning Steering VeCror.和BS的求解相同
+              end
+    end
+end
+Ar=Cr.*aR;
+
+%%
+%-------------------*******************Channel*********-------------------------信道部分
+
+
+k1=randi([0 40],16,140); %在[0,40]之间产生16×140维矩阵
+Kx=(sqrt(k1./(k1+1)));   %根号下k1./(k1+1) 16×140维
+Ky=(1./(k1+1)); %Ky中每个元素都是1/（k1+1） 16×140维
+%------------------------
+
+for j=1:16
+    
+    for k=1:140
+     alpha(j,k)= Kx(j,k) + 1i.*(Ky(j,k));
+    end
+end
+alpha_f=transpose(alpha.*exp(1i.*phi)); %transpose：取非共轭转置 phi：[0,360]之间的随机角度 16×140维 
+%alpha_f相当于在alpha基础上每个元素×上一个角度
+
+H_compact=Ar*transpose(alpha_f)*At_h;   %简洁的H表示式 transpose(alpha_f)是文献里的G
+
+SS=randi([0 1],Mt,64); % training signal 训练信号 在[0,1]上生成128×64维伪随机数
+TY=transpose(SS)*conj(At); %SS的转置×基站发射的导向信号的复共轭
+QQ=kron(TY,Ar);        % 求TY，Ar矩阵的Kronecker积 TY1*Ar,TY2*Ar,TY3*Ar…… QQ是测量矩阵
+
+YY1=H_compact*SS;      % H信道矩阵×训练信号
+Received=YY1(:);       
+
+
+epsilon=2.25; %ε=2.25
+L_prime=log2(2240)+2*Q_bit; %反馈比特数目 2240=Gr×Gt=G
+
+
+%% OMp  正交匹配追踪算法
+[N,G] = size(QQ);
+g_hat= zeros(G,1);
+residual=Received; %初始化残差r=y
+S_g=[]; %索引集S_g=0,
+
+for  t= 1:L_prime   %对于所有反馈比特
+    p= QQ'*residual;  % the complex transpose and residual 复转置与残差 应用QR分解来找到稀疏的?（估计稀疏向量）
+    
+    for ii=1:G
+        fx(ii)=abs(p(ii)); 
+    end
+    
+    if fx<epsilon   %如果残差的范数小于ε，跳出循环
+        break; 
+    end
+    
+    
+    n_star = find(fx == max(fx)); %找到活跃路径索引的最大概率
+    S_g = union(S_g,n_star); %union：S_g和n_star的并集，将活跃路径索引添加到索引集中，对索引集进行扩充
+    g_hat(S_g)=pinv(QQ(:,S_g))* Received;  %%coeffecient update 更新反射？
+    %若A不是方阵，或者|A|=0，那么只能求A的伪逆，所谓伪逆是通过SVD计算出来的；pinv(A)表示A是伪逆;
+    %对测量矩阵的最大概率活跃路径索引列进行求伪逆（?）然后×接收信号（对应第七步）
+    residual=Received-QQ*g_hat;   %%residu update 更新残差（步骤8）
+    
+  
+end
+
+%%
+% %%-LLOYDD algorthm------LLOYD 算法
+% Quantization data: thresholds and reconstruction levels 量化数据:阈值和重建水平
+
+%%%%%%%%%%%%%%%%%%%Quantization Process of REAL PART 实部量化过程
+n1=1024;
+L=2^Q_bit; %以Q_bit传输信道
+ vmax=max(real(g_hat));
+ vmin=min(real(g_hat));
+ del=(vmax-vmin)/L;
+ [part,code] = lloyds(real(g_hat),L);%L是码本codebook的初始值，用g_hat的实部优化标量量化参数part和码本code
+ 
+ [ind_real,q_Real]=quantiz(real(g_hat),part,code);                    % Quantization process 量化过程 生成量化信号
+                                                                      % ind contain index number and q contain quantized  values
+                                                                      % ind_real包含索引号，q_Real包含量化值
+ %quantiz:[index,quants]=quantiz(sig,partition,codebook)
+ %sig表示原始信号；partition是分割向量，代表对量化范围分割等级；codebook代表量化值的集合；
+ %index代表的是按照分割向量构成的区间来划分等级，看原始信号属于哪个等级索引。
+ % quants代表的是按照索引取codebook里的量化值，即为原始信号的量化值。
+ l1=length(ind_real);%原始信号索引号的长度
+ l2=length(q_Real); %g_hat实部量化值的长度
+  
+ for i=1:l1
+    if(ind_real(i)~=0)       % To make index as binary decimal so started from 0 to N 把下标设为二进制小数，从0到N
+       ind_real(i)=ind_real(i)-1;
+    end 
+    i=i+1;
+ end   
+  for i=1:l2
+     if(q_Real(i)==vmin-(del/2))                          % To make quantize value inbetween the levels 使两级之间的值量化
+         q_Real(i)=vmin+(del/2);
+     end
+  end
+
+%---------- Encoding Process 编码过程
+ code=de2bi(ind_real,'left-msb');             % Cnvert the decimal to binary 把十进制转化为二进制 
+ %给出一个“left msb”的msb标志会翻转输出，将MSB显示在左侧方向。
+ k=1;
+for i=1:l1
+    for j=1:Q_bit
+        coded(k)=code(i,j);                  % convert code matrix to a coded row vector 将代码矩阵转换为编码行向量
+        j=j+1;
+        k=k+1;
+    end
+    i=i+1;
+end
+
+ 
+ %  -------- Demodulation Of PCM signal PCM信号的解调
+ quant=reshape(coded,Q_bit,length(coded)/Q_bit);
+ index=bi2de(quant','left-msb');                    % Getback the index in decimal form 返回十进制形式的索引
+ q_Real=del*index+vmin+(del/2);                     % getback Quantized values 回到量化值
+
+ %%%%%%%%%%%%%%% QUANTIZATION IMAGINNARY PART 浇浇浇浇浇?  量化虚部部分
+ vmax_imag=max(imag(g_hat)); 
+ vmin_imag=min(imag(g_hat)); %虚部
+ del_imag=(vmax_imag-vmin_imag)/L; %同上
+ [part_imag,code_imag] = lloyds(real(g_hat),L);
+ [ind_imag,q_imag]=quantiz(imag(g_hat),part_imag,code_imag);                     % Quantization process 量化过程
+                                                                      % ind contain index number and q contain quantized  values
+ l1_imag=length(ind_imag);
+ l2_imag=length(q_imag);
+  
+ for i=1:l1_imag
+    if(ind_imag(i)~=0)                                            % To make index as binary decimal so started from 0 to N
+       ind_imag(i)=ind_imag(i)-1;
+    end 
+    i=i+1;
+ end   
+  for i=1:l2_imag
+     if(q_imag(i)==vmin_imag-(del_imag/2))                          % To make quantize value inbetween the levels
+         q_imag(i)=vmin_imag+(del_imag/2);
+     end
+  end
+%   figure;
+%  stem(q_imag);grid on;                                       % Display the Quantize values
+%  title('Quantized Signal IMAG');
+%  ylabel('Amplitude--->');
+%  xlabel('Time--->');
+  
+ % --------- Encoding Process
+ code_imag=de2bi(ind_imag,'left-msb');             % Cnvert the decimal to binary
+ w=1;
+for i=1:l1_imag
+    for j=1:Q_bit
+        coded_imag(w)=code_imag(i,j);                  % convert code matrix to a coded row vector
+        j=j+1;
+        w=w+1;
+    end
+    i=i+1;
+end
+% figure;
+% subplot(2,1,1); grid on;
+% stairs(coded_imag);                                 % Display the encoded signal
+% axis([0 100 -2 3]);  title('Encoded Signal IMAG');
+% ylabel('Amplitude--->');
+% xlabel('Time--->');
+ 
+ %   Demodulation Of PCM signal    PCM信号的解调
+ 
+ quant_imag=reshape(coded_imag,Q_bit,length(coded_imag)/Q_bit);
+ index_imag=bi2de(quant_imag','left-msb');                    % Getback the index in decimal form
+ q_imag=del_imag*index_imag+vmin_imag+(del_imag/2);                       % getback Quantized values
+%  subplot(2,1,2); grid on;
+%  plot(q_imag);                                                        % Plot Demodulated signal
+%  title('Demodulated Signal IMAG');
+
+
+ 
+ gg_hat_BS=q_Real +1i*q_imag;   %量化实部＋量化虚部
+ 
+ for i=1:2240   %1:G
+ if  gg_hat_BS(i) == gg_hat_BS(1)
+ gg_hat_BS_arrived(i)=0;
+ end 
+ if  gg_hat_BS(i) ~=gg_hat_BS(1)
+  gg_hat_BS_arrived(i)=gg_hat_BS(i);    
+ end
+ end
+ 
+%  figure
+%  plot(gg_hat_BS_arrived);                                                        % Plot Demodulated signal
+%  title('G^hat arrived BS');
+ 
+ 
+GG_arrived_BS=reshape(gg_hat_BS_arrived,16,140); %GG_arrived_BS:2×128
+ 
+ 
+H_estimated=Ar*GG_arrived_BS*At_h;   %信道估计矩阵
+
+%  figure(1)
+%  plot(H_estimated);                                                        % Plot Demodulated signal
+%  title('信道估计矩阵');
+%  
+
+
+B=(H_compact-H_estimated).*conj(H_compact-H_estimated);
+NMSE=mean(B./((norm(H_estimated,2))*(norm(H_compact,2)))); %norm：返回H_estimated中最大的奇异值
+NMSEfin(ip,iyte)=mean(NMSE);
+
+
+CAP(ip,iyte)=log2(det(eye(Mr)+((10.^(SNR/10))/Mt)*H_estimated*H_estimated')); %ip:三种比特速率 itype:七种数目的发射天线
+%eye:返回单位矩阵
+CAPwithPerfect(ip,iyte)=log2(det(eye(Mr)+((10.^(SNR/10))/Mt)*(H_compact)*(H_compact')));
+
+
+end
+end
+
+figure  %画图
+for ne=1:7
+    l(ne)=plot(NofSNR,CAP(ne,:),'--');
+    hold on
+    p(ne)=plot(NofSNR,CAPwithPerfect(ne,:));
+    hold on
+    grid on
+    xlabel('SNR')
+    ylabel('Capacity (bps/Hz)')
+    legend('\qbit=2', 'qbit-perfect=2', '\qbit=4', '\qbit-perfect=4', '\qbit=8', '\qbit-perfect=8', 'location', 'northwest')
+end
+
