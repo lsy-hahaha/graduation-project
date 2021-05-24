@@ -1,0 +1,292 @@
+%%%%%%%%%%%%%%%%%%%%% 2 %%%%%%%%%%%%%%%%%%%%%%%
+for ii = 1:SNR_n
+    amp2 = 10 ^ (SNR(ii,1)*0.05) / (sqrt(i_ant2));
+    D = zeros(K,K*L*L);
+    H = zeros(i_ant2,K*L*L);
+    G = zeros(i_ant2,K*L*L);
+    csi_mse2 = zeros(1,1);
+    for jj = 1 : Num
+        shadow_amp = lognrnd(mu,sigma);%定义阴影衰落
+        %%假设用户终端均匀分布
+        dis(1:K,1:3) = (rem(rand(K,3) * ra, ra) + 1) * rh;
+        ang(1:K,1:3) = rand(K,3) * 2 * pi;
+        pos(1:K,1:3) = dis .* (exp(1i * ang));
+        pos(:,2) = pos(:,2) + base(2,1);
+        pos(:,3) = pos(:,3) + base(3,1);
+
+       %生成信道
+        for l1 = 1 : L%遍历基站
+            for l2 = 1 : L%遍历用户
+                H(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) = 1 / sqrt(2) * (randn(i_ant2,K)+1i*randn(i_ant2,K));
+                D(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) = shadow_amp  * diag(((abs(pos(:,l2)-base(l1,1))*0.01).^(-0.5*gamma)));
+                G(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) = H(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) * D(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K);
+            end
+        end
+        beta = shadow_amp  * ((rc*0.01).^(-0.5*gamma)); 
+        amp_use2 = amp2 / beta;
+
+        %生成调制符号，每N列对应一个小区中的符号
+        symbol = sign(randn(K,L*Nd));%BPSK调制
+        for k = 1 : K
+            for l = 1 : L*Nd
+                if 0 == symbol(k,l)
+                    symbol(k,l) = 1;
+                else
+                end
+            end
+        end
+
+        receive_symbol = zeros(i_ant2,Nd*L); %存储接收信号
+        noise =  (randn(i_ant2,Nd*L)+1i*randn(i_ant2,Nd*L)) / sqrt(2);%生成噪声
+        receive_symbol = receive_symbol + noise; %加噪
+        for j = 1 : L
+            for l = 1 : L
+                Gjl = G(:,(j-1)*L*K+(l-1)*K+1:(j-1)*L*K+l*K);
+                receive_symbol(:,(j-1)*Nd+1:j*Nd) = receive_symbol(:,(j-1)*Nd+1:j*Nd) + amp_use2 * Gjl  * symbol(:,(l-1)*Nd+1:l*Nd);
+            end
+        end
+        
+
+        %% 生成导频信号 
+        pilots = zeros(tao,K);%Chu 
+        if 0 == mod(tao,2)
+            for k = 1 : K
+                for l = 0 : tao-1
+                    ll = mod(l+k-1, tao);
+                    pilots(l+1,k) = exp(1i*pi*ll*ll/tao);
+                end
+            end
+        else
+            for k = 1 : K
+                for l = 0 : tao-1
+                    ll = mod(l+k-1, tao);
+                    pilots(l+1,k) = exp(1i*pi*ll*(ll+1)/tao);
+                end
+            end
+        end
+        R_p = pilots.' * conj(pilots);
+        %% 接收导频信号
+        receive_pilots = zeros(i_ant2,tao*L);
+        noise =  (randn(i_ant2,tao*L)+1i*randn(i_ant2,tao*L)) / sqrt(2);
+        receive_pilots = receive_pilots + noise;
+        for j = 1 : L
+            for l = 1 : L
+                Gjl = G(:,(j-1)*L*K+(l-1)*K+1:(j-1)*L*K+l*K);
+                receive_pilots(:,(j-1)*tao+1:j*tao) = receive_pilots(:,(j-1)*tao+1:j*tao) + amp_use2 * Gjl  * pilots.';
+            end
+        end
+
+        %% 信道估计
+        H_svd = zeros(i_ant2,K*L);
+        H_ls = zeros(i_ant2,K*L);
+        H_ilsp2 = zeros(i_ant2,K*L);
+        G_svd = zeros(i_ant2,K*L);
+
+
+        for j = 1 : L
+            r_x = zeros(i_ant2,i_ant2);
+            for k = 1 : tao
+                r_x = r_x + receive_pilots(:,(j-1)*tao+k) * receive_pilots(:,(j-1)*tao+k)';
+            end
+            for k = 1 : Nd
+                r_x = r_x + receive_symbol(:,(j-1)*Nd+k) * receive_symbol(:,(j-1)*Nd+k)';
+            end
+            r_x = r_x / Nt;   %求接收信号的协方差矩阵 导频加数据
+            %LS
+            Hpi = receive_pilots(:,(j-1)*tao+1:j*tao) * conj(pilots) / R_p / amp_use2;
+            H_ls(:,(j-1)*K+1:j*K) = Hpi / D(:,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K);
+        
+            %SVD
+            [W,~,~] = svd(r_x);
+            Ud = W(:,1:K);   %取前K列 左奇异值矩阵
+            H_svd(:,(j-1)*K+1:j*K) = Ud * Ud' * H_ls(:,(j-1)*K+1:j*K); %最终svd估计值
+            
+            %SVD+ILSP 
+            %信号检测部分
+                    %第一次迭代
+                    symbol_use = [];
+                    G_s_ni = zeros(K*L,i_ant2);
+                    G_svd(:,(j-1)*K+1:j*K) = H_svd(:,(j-1)*K+1:j*K) * D(:,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K);%SVD信道估计
+                    G_s_ni((j-1)*K+1:j*K,:) = pinv(G_svd(:,(j-1)*K+1:j*K));  %伪逆
+                %从所有可能的发射信号中找最小值
+                    symbol_1(:,(j-1)*Nd+1:j*Nd) = G_s_ni((j-1)*K+1:j*K,:) * receive_symbol(:,(j-1)*Nd+1:j*Nd);
+                    symbol_use = (symbol_1>=0)-(symbol_1<0); 
+                    symbol_use=[symbol_use,symbol_1];   %得到估计的发射信号
+              
+                
+                %最小二乘信道估计 用得到的信号做
+                R_i = symbol_use(:,(j-1)*Nd+1:j*Nd) * (symbol_use(:,(j-1)*Nd+1:j*Nd))';
+                G_ilsp = receive_symbol(:,(j-1)*Nd+1:j*Nd) * (symbol_use(:,(j-1)*Nd+1:j*Nd))' / R_i / amp_use2;              
+                H_ilsp2(:,(j-1)*K+1:j*K) = G_ilsp / D(:,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K);
+            
+        end
+            
+ 
+            
+            
+        
+        %% MSE计算
+        csi_error2 = zeros(1,1);
+        for j = 1 : L
+            sum_e_H2 = zeros(1,1);
+            for k = 1 : i_ant2
+                sum_e_H2(1,1) = sum_e_H2(1,1) + (H(k,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K)-H_ilsp2(k,(j-1)*K+1:j*K)) * (H(k,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K)-H_ilsp2(k,(j-1)*K+1:j*K))';
+            end
+            csi_error2 = csi_error2 + sum_e_H2;
+        end
+        csi_mse2 = csi_mse2 + csi_error2 / L / K / i_ant;
+
+    end
+    csi_mse2 = csi_mse2 / Num;
+    mse_store2(ii,1) = [csi_mse2];
+    sprintf('%d',ii)
+
+end
+
+
+
+
+%%%%%%%%%%%%%%%%%%%% 3 %%%%%%%%%%%%%%%%%%%%%%%%%
+for ii = 1:SNR_n
+    amp3 = 10 ^ (SNR(ii,1)*0.05) / (sqrt(i_ant3));
+    D = zeros(K,K*L*L);
+    H = zeros(i_ant3,K*L*L);
+    G = zeros(i_ant3,K*L*L);
+    csi_mse3 = zeros(1,1);
+    for jj = 1 : Num
+        shadow_amp = lognrnd(mu,sigma);%定义阴影衰落
+        %%假设用户终端均匀分布
+        dis(1:K,1:3) = (rem(rand(K,3) * ra, ra) + 1) * rh;
+        ang(1:K,1:3) = rand(K,3) * 2 * pi;
+        pos(1:K,1:3) = dis .* (exp(1i * ang));
+        pos(:,2) = pos(:,2) + base(2,1);
+        pos(:,3) = pos(:,3) + base(3,1);
+
+       %生成信道
+        for l1 = 1 : L%遍历基站
+            for l2 = 1 : L%遍历用户
+                H(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) = 1 / sqrt(2) * (randn(i_ant3,K)+1i*randn(i_ant3,K));
+                D(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) = shadow_amp  * diag(((abs(pos(:,l2)-base(l1,1))*0.01).^(-0.5*gamma)));
+                G(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) = H(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K) * D(:,(l1-1)*L*K+(l2-1)*K+1:(l1-1)*L*K+l2*K);
+            end
+        end
+        beta = shadow_amp  * ((rc*0.01).^(-0.5*gamma)); 
+        amp_use3 = amp3 / beta;
+
+        %生成调制符号，每N列对应一个小区中的符号
+        symbol = sign(randn(K,L*Nd));%BPSK调制
+        for k = 1 : K
+            for l = 1 : L*Nd
+                if 0 == symbol(k,l)
+                    symbol(k,l) = 1;
+                else
+                end
+            end
+        end
+
+        receive_symbol = zeros(i_ant3,Nd*L); %存储接收信号
+        noise =  (randn(i_ant3,Nd*L)+1i*randn(i_ant3,Nd*L)) / sqrt(2);%生成噪声
+        receive_symbol = receive_symbol + noise; %加噪
+        for j = 1 : L
+            for l = 1 : L
+                Gjl = G(:,(j-1)*L*K+(l-1)*K+1:(j-1)*L*K+l*K);
+                receive_symbol(:,(j-1)*Nd+1:j*Nd) = receive_symbol(:,(j-1)*Nd+1:j*Nd) + amp_use3 * Gjl  * symbol(:,(l-1)*Nd+1:l*Nd);
+            end
+        end
+        
+
+        %% 生成导频信号 
+        pilots = zeros(tao,K);%Chu 
+        if 0 == mod(tao,2)
+            for k = 1 : K
+                for l = 0 : tao-1
+                    ll = mod(l+k-1, tao);
+                    pilots(l+1,k) = exp(1i*pi*ll*ll/tao);
+                end
+            end
+        else
+            for k = 1 : K
+                for l = 0 : tao-1
+                    ll = mod(l+k-1, tao);
+                    pilots(l+1,k) = exp(1i*pi*ll*(ll+1)/tao);
+                end
+            end
+        end
+        R_p = pilots.' * conj(pilots);
+        %% 接收导频信号
+        receive_pilots = zeros(i_ant3,tao*L);
+        noise =  (randn(i_ant3,tao*L)+1i*randn(i_ant3,tao*L)) / sqrt(2);
+        receive_pilots = receive_pilots + noise;
+        for j = 1 : L
+            for l = 1 : L
+                Gjl = G(:,(j-1)*L*K+(l-1)*K+1:(j-1)*L*K+l*K);
+                receive_pilots(:,(j-1)*tao+1:j*tao) = receive_pilots(:,(j-1)*tao+1:j*tao) + amp_use3 * Gjl  * pilots.';
+            end
+        end
+
+        %% 信道估计
+        H_svd = zeros(i_ant3,K*L);
+        H_ls = zeros(i_ant3,K*L);
+        H_ilsp3 = zeros(i_ant3,K*L);
+        G_svd = zeros(i_ant3,K*L);
+
+
+        for j = 1 : L
+            r_x = zeros(i_ant3,i_ant3);
+            for k = 1 : tao
+                r_x = r_x + receive_pilots(:,(j-1)*tao+k) * receive_pilots(:,(j-1)*tao+k)';
+            end
+            for k = 1 : Nd
+                r_x = r_x + receive_symbol(:,(j-1)*Nd+k) * receive_symbol(:,(j-1)*Nd+k)';
+            end
+            r_x = r_x / Nt;   %求接收信号的协方差矩阵 导频加数据
+            %LS
+            Hpi = receive_pilots(:,(j-1)*tao+1:j*tao) * conj(pilots) / R_p / amp_use3;
+            H_ls(:,(j-1)*K+1:j*K) = Hpi / D(:,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K);
+        
+            %SVD
+            [W,~,~] = svd(r_x);
+            Ud = W(:,1:K);   %取前K列 左奇异值矩阵
+            H_svd(:,(j-1)*K+1:j*K) = Ud * Ud' * H_ls(:,(j-1)*K+1:j*K); %最终svd估计值
+            
+            %SVD+ILSP 
+            %信号检测部分
+                    %第一次迭代
+                    symbol_use = [];
+                    G_s_ni = zeros(K*L,i_ant3);
+                    G_svd(:,(j-1)*K+1:j*K) = H_svd(:,(j-1)*K+1:j*K) * D(:,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K);%SVD信道估计
+                    G_s_ni((j-1)*K+1:j*K,:) = pinv(G_svd(:,(j-1)*K+1:j*K));  %伪逆
+                %从所有可能的发射信号中找最小值
+                    symbol_1(:,(j-1)*Nd+1:j*Nd) = G_s_ni((j-1)*K+1:j*K,:) * receive_symbol(:,(j-1)*Nd+1:j*Nd);
+                    symbol_use = (symbol_1>=0)-(symbol_1<0); 
+                    symbol_use=[symbol_use,symbol_1];   %得到估计的发射信号
+              
+                
+                %最小二乘信道估计 用得到的信号做
+                R_i = symbol_use(:,(j-1)*Nd+1:j*Nd) * (symbol_use(:,(j-1)*Nd+1:j*Nd))';
+                G_ilsp3 = receive_symbol(:,(j-1)*Nd+1:j*Nd) * (symbol_use(:,(j-1)*Nd+1:j*Nd))' / R_i / amp_use3;              
+                H_ilsp3(:,(j-1)*K+1:j*K) = G_ilsp3 / D(:,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K);
+            
+        end
+            
+ 
+            
+            
+        
+        %% MSE计算
+        csi_error3 = zeros(1,1);
+        for j = 1 : L
+            sum_e_H3 = zeros(1,1);
+            for k = 1 : i_ant
+                sum_e_H3(1,1) = sum_e_H3(1,1) + (H(k,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K)-H_ilsp3(k,(j-1)*K+1:j*K)) * (H(k,(j-1)*L*K+(j-1)*K+1:(j-1)*L*K+j*K)-H_ilsp3(k,(j-1)*K+1:j*K))';
+            end
+            csi_error3 = csi_error3 + sum_e_H3;
+        end
+        csi_mse3 = csi_mse3 + csi_error3 / L / K / i_ant;
+
+    end
+    csi_mse3 = csi_mse3 / Num;
+    mse_store3(ii,1) = [csi_mse3];
+    sprintf('%d',ii)
+
+end
